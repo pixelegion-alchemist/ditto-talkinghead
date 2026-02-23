@@ -87,6 +87,13 @@ class Audio2Motion:
             self.lmdm.seq_frames = seq_frames
             # Force re-init of cached diffusion tensors (noise, etc) at new shape
             self.lmdm.sampling_timesteps = None
+            # Propagate to inner pytorch module — it has its own seq_frames
+            # for noise shape in ddim_sample, and its own sampling_timesteps cache.
+            # Without this, the model produces 80-frame outputs while audio2motion
+            # expects seq_frames-frame outputs, causing valid_start underflow.
+            if getattr(self.lmdm, 'model_type', None) == 'pytorch':
+                self.lmdm.model.seq_frames = seq_frames
+                self.lmdm.model.sampling_timesteps = None
         self.seq_frames = self.lmdm.seq_frames
         self.valid_clip_len = self.seq_frames - self.overlap_v2
 
