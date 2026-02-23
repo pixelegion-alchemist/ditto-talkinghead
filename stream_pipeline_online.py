@@ -10,7 +10,7 @@ from core.atomic_components.audio2motion import Audio2Motion
 from core.atomic_components.motion_stitch import MotionStitch
 from core.atomic_components.warp_f3d import WarpF3D
 from core.atomic_components.decode_f3d import DecodeF3D
-from core.atomic_components.putback import PutBack
+from core.atomic_components.putback import PutBack, PutBackGPU
 from core.atomic_components.writer import VideoWriterByImageIO
 from core.atomic_components.wav2feat import Wav2Feat
 from core.atomic_components.cfg import parse_cfg, print_cfg
@@ -60,7 +60,7 @@ class StreamSDK:
         self.motion_stitch = MotionStitch(stitch_network_cfg)
         self.warp_f3d = WarpF3D(warp_network_cfg)
         self.decode_f3d = DecodeF3D(decoder_cfg)
-        self.putback = PutBack()
+        self.putback = PutBackGPU()
 
         self.wav2feat = Wav2Feat(**wav2feat_cfg)
 
@@ -178,7 +178,20 @@ class StreamSDK:
             source_info["x_s_info_lst"] = smooth_x_s_info_lst(source_info["x_s_info_lst"], smo_k=self.smo_k_s)
 
         self.source_info = source_info
+
+        # Frame skip: produce fewer frames through the pipeline (default: keep all)
+        # skip_n=2 -> 12.5fps, skip_n=3 -> ~8fps from 25fps source
+        self.frame_skip_n = kwargs.get("frame_skip_n", 1)
+
+        # Pre-cache f_s features as GPU tensors to avoid per-frame np->GPU transfer
+        import torch as _torch
+        _device = self.warp_f3d.warp_net.device
+        self._f_s_gpu_lst = [
+            _torch.from_numpy(f_s).to(_device) for f_s in source_info["f_s_lst"]
+        ]
         self.source_info_frames = len(source_info["x_s_info_lst"])
+        # Pre-cache putback static data on GPU (warped masks, source frames, affine grids)
+        self.putback.setup(source_info)
 
         # ======== Setup Condition Handler ========
         self.condition_handler.setup(source_info, self.emo, eye_f0_mode=self.eye_f0_mode, ch_info=self.ch_info)
@@ -297,6 +310,13 @@ class StreamSDK:
             self.stop_event.set()
 
     def _putback_worker(self):
+        import time as _time
+        # Rate governor: pipeline is faster than real-time, spread work evenly
+        # effective_fps = SDK_FPS / frame_skip_n (e.g. 25/2 = 12.5)
+        effective_fps = 25.0 / max(1, getattr(self, 'frame_skip_n', 1))
+        frame_interval = 1.0 / effective_fps
+        next_frame_time = 0.0
+
         while not self.stop_event.is_set():
             try:
                 item = self.putback_queue.get(timeout=1)
@@ -305,10 +325,17 @@ class StreamSDK:
             if item is None:
                 self.writer_queue.put(None)
                 break
-            frame_idx, render_img = item
-            frame_rgb = self.source_info["img_rgb_lst"][frame_idx]
-            M_c2o = self.source_info["M_c2o_lst"][frame_idx]
-            res_frame_rgb = self.putback(frame_rgb, render_img, M_c2o)
+            frame_idx, render_gpu = item
+            res_frame_rgb = self.putback(frame_idx, render_gpu)
+
+            # Governor: wait until this frame's time slot
+            now = _time.monotonic()
+            if next_frame_time == 0.0:
+                next_frame_time = now  # first frame, no wait
+            elif now < next_frame_time:
+                _time.sleep(next_frame_time - now)
+            next_frame_time = max(now, next_frame_time) + frame_interval
+
             self.writer_queue.put(res_frame_rgb)
 
     def decode_f3d_worker(self):
@@ -328,8 +355,8 @@ class StreamSDK:
                 self.putback_queue.put(None)
                 break
             frame_idx, f_3d = item
-            render_img = self.decode_f3d(f_3d)
-            self.putback_queue.put([frame_idx, render_img])
+            render_gpu = self.decode_f3d(f_3d, keep_on_gpu=True)
+            self.putback_queue.put([frame_idx, render_gpu])
 
     def warp_f3d_worker(self):
         try:
@@ -348,8 +375,8 @@ class StreamSDK:
                 self.decode_f3d_queue.put(None)
                 break
             frame_idx, x_s, x_d = item
-            f_s = self.source_info["f_s_lst"][frame_idx]
-            f_3d = self.warp_f3d(f_s, x_s, x_d)
+            f_s = self._f_s_gpu_lst[frame_idx]
+            f_3d = self.warp_f3d(f_s, x_s, x_d, keep_on_gpu=True)
             self.decode_f3d_queue.put([frame_idx, f_3d])
 
     def motion_stitch_worker(self):
@@ -442,7 +469,13 @@ class StreamSDK:
                     valid_res_kp_seq = res_kp_seq[:, res_kp_seq_valid_start: res_kp_seq_valid_start + real_valid_len]
                     x_d_info_list = self.audio2motion.cvt_fmt(valid_res_kp_seq)
 
-                    for x_d_info in x_d_info_list:
+                    for _skip_i, x_d_info in enumerate(x_d_info_list):
+                        # Skip frames at source — reduces ALL downstream stages
+                        # frame_skip_n=2: keep every other frame (~12.5fps from 25fps)
+                        if hasattr(self, "frame_skip_n") and self.frame_skip_n > 1:
+                            if gen_frame_idx % self.frame_skip_n != 0:
+                                gen_frame_idx += 1
+                                continue
                         frame_idx = _mirror_index(gen_frame_idx, self.source_info_frames)
                         ctrl_kwargs = self._get_ctrl_info(gen_frame_idx)
 

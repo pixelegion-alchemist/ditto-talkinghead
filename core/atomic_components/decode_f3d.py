@@ -16,7 +16,6 @@ class DecodeF3D:
     ):
         self.decoder = Decoder(**decoder_cfg)
 
-    def __call__(self, f_s):
-        out = self.decoder(f_s)
+    def __call__(self, f_s, keep_on_gpu=False):
+        out = self.decoder(f_s, keep_on_gpu=keep_on_gpu)
         return out
-    
