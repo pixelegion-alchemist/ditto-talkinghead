@@ -368,6 +368,8 @@ class MotionDecoder(nn.Module):
         cond_tokens = self.cond_encoder(cond_tokens)
 
         null_cond_embed = self.null_cond_embed.to(cond_tokens.dtype)
+        # Slice null_cond_embed to match input seq_len (may differ from trained 80)
+        null_cond_embed = null_cond_embed[:, :cond_tokens.shape[1], :]
         cond_tokens = torch.where(keep_mask_embed, cond_tokens, null_cond_embed)
 
         mean_pooled_cond_tokens = cond_tokens.mean(dim=-2)

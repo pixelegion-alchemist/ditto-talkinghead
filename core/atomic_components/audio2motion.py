@@ -78,9 +78,15 @@ class Audio2Motion:
         online_mode=False,
         v_min_max_for_clip=None,
         smo_k_d=3,
+        seq_frames=None,
     ):
         self.smo_k_d = smo_k_d
         self.overlap_v2 = overlap_v2
+        # Allow runtime override of model window size (default: use model's trained value)
+        if seq_frames is not None and seq_frames != self.lmdm.seq_frames:
+            self.lmdm.seq_frames = seq_frames
+            # Force re-init of cached diffusion tensors (noise, etc) at new shape
+            self.lmdm.sampling_timesteps = None
         self.seq_frames = self.lmdm.seq_frames
         self.valid_clip_len = self.seq_frames - self.overlap_v2
 

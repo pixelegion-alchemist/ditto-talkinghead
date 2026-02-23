@@ -121,6 +121,7 @@ class StreamSDK:
 
         # -- audio2motion: setup --
         self.overlap_v2 = kwargs.get("overlap_v2", 10)
+        self.seq_frames_override = kwargs.get("seq_frames", None)
         self.fix_kp_cond = kwargs.get("fix_kp_cond", 0)
         self.fix_kp_cond_dim = kwargs.get("fix_kp_cond_dim", None)  # [ds,de]
         self.sampling_timesteps = kwargs.get("sampling_timesteps", 50)
@@ -207,6 +208,7 @@ class StreamSDK:
             online_mode=self.online_mode,
             v_min_max_for_clip=self.v_min_max_for_clip,
             smo_k_d=self.smo_k_d,
+            seq_frames=self.seq_frames_override,
         )
 
         # ======== Setup Motion Stitch ========
