@@ -106,6 +106,8 @@ class PutBackGPU:
         # Motion sequence support
         self._sequences = {}           # name -> list of GPU tensors [1, 3, H, W]
         self._sequence_fps = {}        # name -> playback fps
+        self._sequence_grids = {}      # name -> list of grids (per-frame face tracking)
+        self._sequence_masks = {}      # name -> list of warped masks (per-frame face tracking)
         self._active_sequence = None   # name of active sequence (None = static mode)
         self._seq_start_time = None    # monotonic time when current sequence started
 
@@ -239,11 +241,90 @@ class PutBackGPU:
         print(f"[PutBackGPU] Loaded sequence '{name}': {len(frames_gpu)} frames @ {fps}fps{resize_note} "
               f"(~{len(frames_gpu) * 4 * frames_gpu[0].nelement() / 1024 / 1024:.0f}MB GPU)")
 
-    def load_from_manifest(self, avatar_dir):
+    def track_sequence_faces(self, name, source2info, crop_kwargs=None):
+        """Compute per-frame face transforms for a loaded sequence.
+
+        Runs face detection + landmark extraction on each frame to get M_c2o,
+        then pre-caches grids and warped masks per frame. The generated face
+        follows the natural head movement in the sequence.
+
+        Args:
+            name: sequence name (must already be loaded via load_sequence)
+            source2info: Source2Info instance (has face detection + landmark models)
+            crop_kwargs: crop parameters (crop_scale, crop_vx_ratio, etc.)
+                         Should match the registration crop params.
+        """
+        if name not in self._sequences:
+            raise ValueError(f"Sequence '{name}' not loaded. Call load_sequence first.")
+
+        if crop_kwargs is None:
+            crop_kwargs = {}
+
+        seq_frames = self._sequences[name]
+        num_frames = len(seq_frames)
+        oh = seq_frames[0].shape[2]
+        ow = seq_frames[0].shape[3]
+        mask_h, mask_w = 512, 512
+
+        grids = []
+        masks = []
+        last_lmk = None
+
+        for i in range(num_frames):
+            # Get RGB numpy from GPU tensor: [1, 3, H, W] float32 [0,255] -> [H, W, 3] uint8
+            frame_np = seq_frames[i][0].permute(1, 2, 0).byte().cpu().numpy()
+
+            # Run face detection + crop to get M_c2o for this frame
+            try:
+                result = source2info._crop(frame_np, last_lmk=last_lmk, **crop_kwargs)
+                if result is None:
+                    # Face not found — fall back to previous frame's transform
+                    if grids:
+                        grids.append(grids[-1])
+                        masks.append(masks[-1])
+                    else:
+                        # First frame, no fallback — use registration grid
+                        grids.append(self._grids[0])
+                        masks.append(self._warped_masks[0])
+                    print(f"[PutBackGPU] Warning: no face in sequence '{name}' frame {i}, using fallback")
+                    continue
+
+                img_crop, M_c2o, lmk203 = result
+                last_lmk = lmk203  # track from previous frame's landmarks
+
+                M_2x3 = M_c2o[:2, :] if M_c2o.shape[0] >= 2 else M_c2o
+
+                grid = self._make_affine_grid(M_2x3, mask_h, mask_w, oh, ow)
+                grids.append(grid)
+
+                warped_mask = F.grid_sample(
+                    self.mask_gpu, grid, mode='bilinear', padding_mode='zeros', align_corners=True
+                ).clamp(0, 1)
+                masks.append(warped_mask)
+
+            except Exception as e:
+                # Fallback on any detection error
+                if grids:
+                    grids.append(grids[-1])
+                    masks.append(masks[-1])
+                else:
+                    grids.append(self._grids[0])
+                    masks.append(self._warped_masks[0])
+                print(f"[PutBackGPU] Warning: face tracking failed on frame {i}: {e}")
+
+        self._sequence_grids[name] = grids
+        self._sequence_masks[name] = masks
+        print(f"[PutBackGPU] Tracked faces for '{name}': {num_frames} frames")
+
+    def load_from_manifest(self, avatar_dir, source2info=None, crop_kwargs=None):
         """Load all motion sequences defined in an avatar.json manifest.
 
         Args:
             avatar_dir: path to avatar directory containing avatar.json
+            source2info: optional Source2Info for per-frame face tracking.
+                         If provided, each sequence gets face position tracking
+                         so the generated head follows the body animation.
+            crop_kwargs: crop parameters for face tracking (must match registration).
         """
         import json
         manifest_path = os.path.join(avatar_dir, 'avatar.json')
@@ -257,6 +338,10 @@ class PutBackGPU:
             frames_dir = os.path.join(avatar_dir, motion['directory'])
             fps = motion.get('fps', 16)
             self.load_sequence(name, frames_dir, fps)
+
+            # Run face tracking if source2info provided
+            if source2info is not None:
+                self.track_sequence_faces(name, source2info, crop_kwargs)
 
         # Auto-activate the idle motion if defined
         motion_map = manifest.get('motion_mapping', {})
@@ -309,13 +394,11 @@ class PutBackGPU:
         Returns:
             numpy uint8 [oh, ow, 3] — the only CPU transfer
         """
-        grid = self._grids[frame_idx]
-        warped_mask = self._warped_masks[frame_idx]
-
-        # Select background plate: animated sequence or static registration frame
+        # Select background plate and face placement grid/mask
         if self._active_sequence and self._active_sequence in self._sequences:
-            seq = self._sequences[self._active_sequence]
-            fps = self._sequence_fps[self._active_sequence]
+            seq_name = self._active_sequence
+            seq = self._sequences[seq_name]
+            fps = self._sequence_fps[seq_name]
 
             now = time.monotonic()
             if self._seq_start_time is None:
@@ -324,8 +407,18 @@ class PutBackGPU:
             elapsed = now - self._seq_start_time
             seq_idx = int(elapsed * fps) % len(seq)
             frame_rgb_gpu = seq[seq_idx]
+
+            # Use per-frame face tracking grid/mask if available
+            if seq_name in self._sequence_grids:
+                grid = self._sequence_grids[seq_name][seq_idx]
+                warped_mask = self._sequence_masks[seq_name][seq_idx]
+            else:
+                grid = self._grids[frame_idx]
+                warped_mask = self._warped_masks[frame_idx]
         else:
             frame_rgb_gpu = self._frame_rgb_gpu[frame_idx]
+            grid = self._grids[frame_idx]
+            warped_mask = self._warped_masks[frame_idx]
 
         # render_gpu is [1, C, H, W] in [0, 1] from decoder — scale to [0, 255]
         render_255 = render_gpu * 255.0
