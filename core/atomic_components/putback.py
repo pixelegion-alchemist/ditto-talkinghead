@@ -2,7 +2,6 @@ import cv2
 import glob
 import os
 import numpy as np
-import time
 import torch
 import torch.nn.functional as F
 from ..utils.blend import blend_images_cy
@@ -107,7 +106,8 @@ class PutBackGPU:
         self._sequences = {}           # name -> list of GPU tensors [1, 3, H, W]
         self._sequence_fps = {}        # name -> playback fps
         self._active_sequence = None   # name of active sequence (None = static mode)
-        self._seq_start_time = None    # monotonic time when current sequence started
+        self._output_frame_count = 0   # counts __call__ invocations for frame-accurate timing
+        self._output_fps = 25.0        # SDK output rate (matches VideoWriterByImageIO)
 
     def _make_affine_grid(self, M_c2o_2x3, src_h, src_w, dst_h, dst_w):
         """Build a sampling grid that maps from dst (original frame) coords
@@ -267,14 +267,14 @@ class PutBackGPU:
         return manifest
 
     def set_motion(self, name):
-        """Switch active motion sequence. Resets playback timer.
+        """Switch active motion sequence. Resets frame counter.
 
         Args:
             name: sequence name, or None to revert to static mode
         """
         if name is None:
             self._active_sequence = None
-            self._seq_start_time = None
+            self._output_frame_count = 0
             return
 
         if name not in self._sequences:
@@ -282,7 +282,7 @@ class PutBackGPU:
                 f"Unknown sequence '{name}'. Available: {list(self._sequences.keys())}"
             )
         self._active_sequence = name
-        self._seq_start_time = None  # will be set on next __call__
+        self._output_frame_count = 0
         print(f"[PutBackGPU] Active motion: '{name}' "
               f"({len(self._sequences[name])} frames @ {self._sequence_fps[name]}fps)")
 
@@ -317,14 +317,12 @@ class PutBackGPU:
         if self._active_sequence and self._active_sequence in self._sequences:
             seq_name = self._active_sequence
             seq = self._sequences[seq_name]
-            fps = self._sequence_fps[seq_name]
+            seq_fps = self._sequence_fps[seq_name]
 
-            now = time.monotonic()
-            if self._seq_start_time is None:
-                self._seq_start_time = now
-
-            elapsed = now - self._seq_start_time
-            seq_idx = int(elapsed * fps) % len(seq)
+            # Frame-accurate: derive video time from output frame count, not wall clock
+            video_time = self._output_frame_count / self._output_fps
+            seq_idx = int(video_time * seq_fps) % len(seq)
+            self._output_frame_count += 1
             frame_rgb_gpu = seq[seq_idx]
         else:
             frame_rgb_gpu = self._frame_rgb_gpu[frame_idx]
