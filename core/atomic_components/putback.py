@@ -203,7 +203,7 @@ class PutBackGPU:
         if not frame_paths:
             raise ValueError(f"No PNG frames found in {frames_dir}")
 
-        # Validate resolution matches registration frame (grid assumes same dimensions)
+        # Get registration frame dimensions (grid assumes same resolution)
         if self._ready and self._frame_rgb_gpu:
             expected_h = self._frame_rgb_gpu[0].shape[2]
             expected_w = self._frame_rgb_gpu[0].shape[3]
@@ -211,17 +211,17 @@ class PutBackGPU:
             expected_h = expected_w = None
 
         frames_gpu = []
+        resized = False
         for path in frame_paths:
             img_bgr = cv2.imread(path)
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
+            # Auto-resize to match registration frame if needed
             if expected_h is not None:
                 h, w = img_rgb.shape[:2]
                 if h != expected_h or w != expected_w:
-                    raise ValueError(
-                        f"Sequence frame {path} is {w}x{h}, "
-                        f"expected {expected_w}x{expected_h} (must match registration frame)"
-                    )
+                    img_rgb = cv2.resize(img_rgb, (expected_w, expected_h), interpolation=cv2.INTER_AREA)
+                    resized = True
 
             # float32 [0, 255] to match _frame_rgb_gpu format
             tensor = (
@@ -235,7 +235,8 @@ class PutBackGPU:
 
         self._sequences[name] = frames_gpu
         self._sequence_fps[name] = fps
-        print(f"[PutBackGPU] Loaded sequence '{name}': {len(frames_gpu)} frames @ {fps}fps "
+        resize_note = f" (resized to {expected_w}x{expected_h})" if resized else ""
+        print(f"[PutBackGPU] Loaded sequence '{name}': {len(frames_gpu)} frames @ {fps}fps{resize_note} "
               f"(~{len(frames_gpu) * 4 * frames_gpu[0].nelement() / 1024 / 1024:.0f}MB GPU)")
 
     def load_from_manifest(self, avatar_dir):
