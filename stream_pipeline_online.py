@@ -94,6 +94,14 @@ class StreamSDK:
                 ctrl_info[i] = item
         self.ctrl_info = ctrl_info
 
+    def set_sequence(self, name):
+        """Queue a sequence switch. Takes effect at next loop boundary."""
+        if not self._seq_ranges or name not in self._seq_ranges:
+            available = list(self._seq_ranges.keys()) if self._seq_ranges else []
+            raise ValueError(f"Unknown sequence '{name}'. Available: {available}")
+        if name != self._active_seq:
+            self._pending_seq = name
+
     def setup(self, source_path, output_path, **kwargs):
 
         # ======== Prepare Options ========
@@ -169,28 +177,44 @@ class StreamSDK:
             "crop_flag_do_rot": self.crop_flag_do_rot,
         }
 
+        # Build sequences dict from either `sequences` or `sequence_dir` (backward compat)
+        sequences = kwargs.get("sequences", None)
         sequence_dir = kwargs.get("sequence_dir", None)
-        if sequence_dir:
-            # Video mode: register sequence frames directly.
-            # Same face as source_path — each frame gets paired f_s + x_s_info.
-            # is_image_flag=False -> audio drives only expression, pose from source.
+        if sequence_dir and not sequences:
+            sequences = {"default": sequence_dir}
+
+        self._seq_ranges = None
+        self._active_seq = None
+        self._pending_seq = None
+        self._seq_output_idx = {}
+
+        if sequences:
+            # Video mode: register all sequence frames concatenated.
+            # Each sequence occupies a contiguous index range in source_info.
             import glob as _glob
             import cv2 as _cv2
             from core.atomic_components.loader import check_resize
-            frame_paths = sorted(_glob.glob(os.path.join(sequence_dir, '*.png')))
-            if not frame_paths:
-                raise ValueError(f"No PNG frames found in {sequence_dir}")
-            rgb_list = []
-            for p in frame_paths:
-                img = _cv2.imread(p)
-                img_rgb = _cv2.cvtColor(img, _cv2.COLOR_BGR2RGB)
-                h, w = img_rgb.shape[:2]
-                new_h, new_w, rsz_flag = check_resize(h, w, self.max_size)
-                if rsz_flag:
-                    img_rgb = _cv2.resize(img_rgb, (new_w, new_h))
-                rgb_list.append(img_rgb)
-            source_info = self.avatar_registrar.register_frames(rgb_list, **crop_kwargs)
-            print(f"[StreamSDK] Registered {len(rgb_list)} sequence frames (video mode)")
+            all_rgb = []
+            self._seq_ranges = {}
+            for name, seq_dir in sequences.items():
+                frame_paths = sorted(_glob.glob(os.path.join(seq_dir, '*.png')))
+                if not frame_paths:
+                    raise ValueError(f"No PNG frames found in {seq_dir}")
+                start = len(all_rgb)
+                for p in frame_paths:
+                    img = _cv2.imread(p)
+                    img_rgb = _cv2.cvtColor(img, _cv2.COLOR_BGR2RGB)
+                    h, w = img_rgb.shape[:2]
+                    new_h, new_w, rsz_flag = check_resize(h, w, self.max_size)
+                    if rsz_flag:
+                        img_rgb = _cv2.resize(img_rgb, (new_w, new_h))
+                    all_rgb.append(img_rgb)
+                self._seq_ranges[name] = (start, len(frame_paths))
+                print(f"[StreamSDK] Sequence '{name}': {len(frame_paths)} frames (indices {start}-{start + len(frame_paths) - 1})")
+            self._active_seq = list(sequences.keys())[0]
+            self._seq_output_idx = {name: 0 for name in self._seq_ranges}
+            source_info = self.avatar_registrar.register_frames(all_rgb, **crop_kwargs)
+            print(f"[StreamSDK] Registered {len(all_rgb)} total frames (video mode, {len(sequences)} sequences)")
         else:
             n_frames = self.template_n_frames if self.template_n_frames > 0 else self.N_d
             source_info = self.avatar_registrar(
@@ -449,7 +473,6 @@ class StreamSDK:
         global_idx = 0   # frame idx, for template
         local_idx = 0    # for cur audio_feat
         gen_frame_idx = 0    # audio clock (25fps)
-        output_frame_idx = 0  # output clock (advances only when a frame is produced)
         while not self.stop_event.is_set():
             try:
                 item = self.audio2motion_queue.get(timeout=1)    # audio feat
@@ -505,9 +528,29 @@ class StreamSDK:
                             if gen_frame_idx % self.frame_skip_n != 0:
                                 gen_frame_idx += 1
                                 continue
-                        # output_frame_idx tracks produced frames (for source frame mapping)
-                        # gen_frame_idx tracks audio clock (for ctrl_info timing)
-                        frame_idx = _mirror_index(output_frame_idx, self.source_info_frames)
+                        # Map to source frame index
+                        if self._seq_ranges:
+                            # Sequence mode: per-sequence counters + deferred switch
+                            seq_name = self._active_seq
+                            start, count = self._seq_ranges[seq_name]
+                            seq_idx = self._seq_output_idx[seq_name]
+
+                            # Switch at loop boundary (mirror wraps to frame 0)
+                            if self._pending_seq:
+                                period = count * 2 - 2  # mirror loop period
+                                if seq_idx > 0 and seq_idx % period == 0:
+                                    self._active_seq = self._pending_seq
+                                    self._pending_seq = None
+                                    seq_name = self._active_seq
+                                    start, count = self._seq_ranges[seq_name]
+                                    seq_idx = self._seq_output_idx[seq_name]
+
+                            frame_idx = start + _mirror_index(seq_idx, count)
+                            self._seq_output_idx[seq_name] += 1
+                        else:
+                            # Single source mode (image or video file)
+                            frame_idx = _mirror_index(gen_frame_idx, self.source_info_frames)
+
                         ctrl_kwargs = self._get_ctrl_info(gen_frame_idx)
 
                         while not self.stop_event.is_set():
@@ -518,7 +561,6 @@ class StreamSDK:
                                 continue
 
                         gen_frame_idx += 1
-                        output_frame_idx += 1
 
                     res_kp_seq_valid_start += real_valid_len
                 
