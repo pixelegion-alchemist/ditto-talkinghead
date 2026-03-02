@@ -259,7 +259,8 @@ class StreamSDK:
         # ======== Video Writer ========
         self.output_path = output_path
         self.tmp_output_path = output_path + ".tmp.mp4"
-        self.writer = VideoWriterByImageIO(self.tmp_output_path)
+        effective_fps = 25.0 / max(1, self.frame_skip_n)
+        self.writer = VideoWriterByImageIO(self.tmp_output_path, fps=effective_fps)
         self.writer_pbar = tqdm(desc="writer")
 
         # ======== Audio Feat Buffer ========
@@ -447,7 +448,8 @@ class StreamSDK:
         
         global_idx = 0   # frame idx, for template
         local_idx = 0    # for cur audio_feat
-        gen_frame_idx = 0
+        gen_frame_idx = 0    # audio clock (25fps)
+        output_frame_idx = 0  # output clock (advances only when a frame is produced)
         while not self.stop_event.is_set():
             try:
                 item = self.audio2motion_queue.get(timeout=1)    # audio feat
@@ -503,7 +505,9 @@ class StreamSDK:
                             if gen_frame_idx % self.frame_skip_n != 0:
                                 gen_frame_idx += 1
                                 continue
-                        frame_idx = _mirror_index(gen_frame_idx, self.source_info_frames)
+                        # output_frame_idx tracks produced frames (for source frame mapping)
+                        # gen_frame_idx tracks audio clock (for ctrl_info timing)
+                        frame_idx = _mirror_index(output_frame_idx, self.source_info_frames)
                         ctrl_kwargs = self._get_ctrl_info(gen_frame_idx)
 
                         while not self.stop_event.is_set():
@@ -514,6 +518,7 @@ class StreamSDK:
                                 continue
 
                         gen_frame_idx += 1
+                        output_frame_idx += 1
 
                     res_kp_seq_valid_start += real_valid_len
                 
