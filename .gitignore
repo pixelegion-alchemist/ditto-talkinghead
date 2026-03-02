@@ -38,3 +38,6 @@ prepare_data
 
 !example/audio.wav
 !example/image.png
+
+# Panda3D binary model files (can be large)
+*.bam
