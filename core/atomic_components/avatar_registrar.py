@@ -96,7 +96,51 @@ class AvatarRegistrar:
         source_info["img_rgb_lst"] = rgb_list
 
         return source_info
-    
+
+    def register_hybrid(
+        self,
+        face_path,
+        sequence_rgb_list,
+        max_dim=1920,
+        **kwargs,
+    ):
+        """Register face identity from one image, motion from a sequence.
+
+        Face appearance (f_s) comes from face_path for every frame.
+        Head pose (x_s_info), compositing transform (M_c2o), eye state,
+        and background plate (img_rgb) come from sequence_rgb_list per frame.
+
+        Returns source_info with is_image_flag=False so the pipeline uses
+        video mode: audio drives expression only, head pose from source.
+        """
+        # Register face for identity (f_s)
+        face_rgb_list, _ = load_source_frames(face_path, max_dim=max_dim, n_frames=1)
+        face_info = self.source2info(face_rgb_list[0], None, **kwargs)
+
+        # Extract per-frame motion from sequence
+        source_info = {
+            "x_s_info_lst": [],
+            "f_s_lst": [],
+            "M_c2o_lst": [],
+            "eye_open_lst": [],
+            "eye_ball_lst": [],
+        }
+        last_lmk = None
+        for rgb in sequence_rgb_list:
+            info = self.source2info(rgb, last_lmk, **kwargs)
+            source_info["x_s_info_lst"].append(info["x_s_info"])
+            source_info["M_c2o_lst"].append(info["M_c2o"])
+            source_info["f_s_lst"].append(face_info["f_s"])  # same identity every frame
+            source_info["eye_open_lst"].append(info["eye_open"])
+            source_info["eye_ball_lst"].append(info["eye_ball"])
+            last_lmk = info["lmk203"]
+
+        source_info["sc"] = face_info["x_s_info"]["kp"].flatten()
+        source_info["is_image_flag"] = False  # video mode
+        source_info["img_rgb_lst"] = sequence_rgb_list
+
+        return source_info
+
     def __call__(self, *args, **kwargs):
         return self.register(*args, **kwargs)
     
