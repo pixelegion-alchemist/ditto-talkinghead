@@ -96,7 +96,58 @@ class AvatarRegistrar:
         source_info["img_rgb_lst"] = rgb_list
 
         return source_info
-    
+
+    def register_hybrid(
+        self,
+        face_path,
+        sequence_rgb_list,
+        max_dim=1920,
+        **kwargs,
+    ):
+        """Register face identity from one image, motion from a sequence.
+
+        Face appearance (f_s) and canonical keypoints (kp) come from face_path.
+        Pose (pitch/yaw/roll/t/scale/exp), compositing transform (M_c2o), and
+        background plate come from sequence frames.
+
+        The per-frame x_s_info uses face.png's kp with the sequence's pose —
+        this keeps the stitch-level mixing consistent with f_s while injecting
+        the sequence's head movement into x_d through the normal pipeline.
+        """
+        # Register face for identity and canonical kp
+        face_rgb_list, _ = load_source_frames(face_path, max_dim=max_dim, n_frames=1)
+        face_info = self.source2info(face_rgb_list[0], None, **kwargs)
+        face_kp = face_info["x_s_info"]["kp"]
+
+        # Extract per-frame motion from sequence
+        source_info = {
+            "x_s_info_lst": [],
+            "f_s_lst": [],
+            "M_c2o_lst": [],
+            "eye_open_lst": [],
+            "eye_ball_lst": [],
+        }
+        last_lmk = None
+        for rgb in sequence_rgb_list:
+            info = self.source2info(rgb, last_lmk, **kwargs)
+
+            # Sequence's pose + face.png's kp
+            hybrid_x_s_info = dict(info["x_s_info"])
+            hybrid_x_s_info["kp"] = face_kp
+
+            source_info["x_s_info_lst"].append(hybrid_x_s_info)
+            source_info["M_c2o_lst"].append(info["M_c2o"])
+            source_info["f_s_lst"].append(face_info["f_s"])
+            source_info["eye_open_lst"].append(info["eye_open"])
+            source_info["eye_ball_lst"].append(info["eye_ball"])
+            last_lmk = info["lmk203"]
+
+        source_info["sc"] = face_kp.flatten()
+        source_info["is_image_flag"] = False
+        source_info["img_rgb_lst"] = sequence_rgb_list
+
+        return source_info
+
     def __call__(self, *args, **kwargs):
         return self.register(*args, **kwargs)
     

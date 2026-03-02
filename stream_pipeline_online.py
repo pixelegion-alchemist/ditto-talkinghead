@@ -1,3 +1,4 @@
+import os
 import threading
 import queue
 import numpy as np
@@ -167,13 +168,36 @@ class StreamSDK:
             "crop_vy_ratio": self.crop_vy_ratio,
             "crop_flag_do_rot": self.crop_flag_do_rot,
         }
-        n_frames = self.template_n_frames if self.template_n_frames > 0 else self.N_d
-        source_info = self.avatar_registrar(
-            source_path, 
-            max_dim=self.max_size, 
-            n_frames=n_frames, 
-            **crop_kwargs,
-        )
+        sequence_dir = kwargs.get("sequence_dir", None)
+        if sequence_dir:
+            import glob as _glob
+            import cv2 as _cv2
+            from core.atomic_components.loader import check_resize
+            frame_paths = sorted(_glob.glob(os.path.join(sequence_dir, '*.png')))
+            if not frame_paths:
+                raise ValueError(f"No PNG frames found in {sequence_dir}")
+            sequence_rgb_list = []
+            for p in frame_paths:
+                img = _cv2.imread(p)
+                img_rgb = _cv2.cvtColor(img, _cv2.COLOR_BGR2RGB)
+                h, w = img_rgb.shape[:2]
+                new_h, new_w, rsz_flag = check_resize(h, w, self.max_size)
+                if rsz_flag:
+                    img_rgb = _cv2.resize(img_rgb, (new_w, new_h))
+                sequence_rgb_list.append(img_rgb)
+            print(f"[StreamSDK] Hybrid registration: face={source_path}, "
+                  f"sequence={sequence_dir} ({len(sequence_rgb_list)} frames)")
+            source_info = self.avatar_registrar.register_hybrid(
+                source_path, sequence_rgb_list, max_dim=self.max_size, **crop_kwargs
+            )
+        else:
+            n_frames = self.template_n_frames if self.template_n_frames > 0 else self.N_d
+            source_info = self.avatar_registrar(
+                source_path,
+                max_dim=self.max_size,
+                n_frames=n_frames,
+                **crop_kwargs,
+            )
 
         if len(source_info["x_s_info_lst"]) > 1 and self.smo_k_s > 1:
             source_info["x_s_info_lst"] = smooth_x_s_info_lst(source_info["x_s_info_lst"], smo_k=self.smo_k_s)
