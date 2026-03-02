@@ -97,6 +97,35 @@ class AvatarRegistrar:
 
         return source_info
     
+    def register_frames(self, rgb_list, is_image_flag=False, **kwargs):
+        """Register from pre-loaded RGB frames (e.g. a directory of PNGs).
+
+        Same as register() but skips load_source_frames — caller provides frames directly.
+        Defaults to video mode (is_image_flag=False) so audio drives only expression.
+        """
+        source_info = {
+            "x_s_info_lst": [],
+            "f_s_lst": [],
+            "M_c2o_lst": [],
+            "eye_open_lst": [],
+            "eye_ball_lst": [],
+        }
+        keys = ["x_s_info", "f_s", "M_c2o", "eye_open", "eye_ball"]
+        last_lmk = None
+        for rgb in rgb_list:
+            info = self.source2info(rgb, last_lmk, **kwargs)
+            for k in keys:
+                source_info[f"{k}_lst"].append(info[k])
+            last_lmk = info["lmk203"]
+
+        sc_f0 = source_info['x_s_info_lst'][0]['kp'].flatten()
+
+        source_info["sc"] = sc_f0
+        source_info["is_image_flag"] = is_image_flag
+        source_info["img_rgb_lst"] = rgb_list
+
+        return source_info
+
     def __call__(self, *args, **kwargs):
         return self.register(*args, **kwargs)
     
