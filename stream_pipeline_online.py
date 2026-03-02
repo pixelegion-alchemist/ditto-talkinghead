@@ -389,7 +389,6 @@ class StreamSDK:
             self.stop_event.set()
 
     def _motion_stitch_worker(self):
-        prev_x_d = None
         while not self.stop_event.is_set():
             try:
                 item = self.motion_stitch_queue.get(timeout=1)
@@ -402,13 +401,6 @@ class StreamSDK:
             frame_idx, x_d_info, ctrl_kwargs = item
             x_s_info = self.source_info["x_s_info_lst"][frame_idx]
             x_s, x_d = self.motion_stitch(x_s_info, x_d_info, **ctrl_kwargs)
-
-            # Chain: previous x_d becomes this frame's x_s
-            # Keeps warp delta small per frame
-            if prev_x_d is not None:
-                x_s = prev_x_d
-            prev_x_d = x_d.copy()
-
             self.warp_f3d_queue.put([frame_idx, x_s, x_d])
 
     def audio2motion_worker(self):
