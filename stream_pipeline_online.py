@@ -566,11 +566,6 @@ class StreamSDK:
 
                             frame_idx = start + _mirror_index(seq_idx, count)
                             self._seq_output_idx[seq_name] += 1
-
-                            # Plates own all pose. Audio2motion only drives exp (lips).
-                            plate_info = self.source_info["x_s_info_lst"][frame_idx]
-                            for _k in ("pitch", "yaw", "roll", "t", "scale"):
-                                x_d_info[_k] = plate_info[_k]
                         else:
                             # Single source mode (image or video file)
                             frame_idx = _mirror_index(gen_frame_idx, self.source_info_frames)
