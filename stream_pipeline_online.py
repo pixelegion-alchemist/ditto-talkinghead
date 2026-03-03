@@ -94,12 +94,22 @@ class StreamSDK:
                 ctrl_info[i] = item
         self.ctrl_info = ctrl_info
 
-    def set_sequence(self, name):
-        """Queue a sequence switch. Takes effect at next loop boundary."""
+    def set_sequence(self, name, immediate=False):
+        """Queue a sequence switch.
+
+        Args:
+            name: Sequence name (must exist in _seq_ranges).
+            immediate: If True, switch NOW (resets counter to 0).
+                       If False (default), defer to next loop boundary.
+        """
         if not self._seq_ranges or name not in self._seq_ranges:
             available = list(self._seq_ranges.keys()) if self._seq_ranges else []
             raise ValueError(f"Unknown sequence '{name}'. Available: {available}")
-        if name != self._active_seq:
+        if immediate:
+            self._active_seq = name
+            self._pending_seq = None
+            self._seq_output_idx[name] = 0
+        elif name != self._active_seq:
             self._pending_seq = name
 
     def setup(self, source_path, output_path, **kwargs):
