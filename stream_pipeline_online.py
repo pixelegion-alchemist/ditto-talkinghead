@@ -237,6 +237,15 @@ class StreamSDK:
         if len(source_info["x_s_info_lst"]) > 1 and self.smo_k_s > 1:
             source_info["x_s_info_lst"] = smooth_x_s_info_lst(source_info["x_s_info_lst"], smo_k=self.smo_k_s)
 
+        # Freeze facial expression to frame 0 across all source frames.
+        # Source video frames have natural expression variation (mouth micro-movements)
+        # that cycles through as phantom lip sync.  We want head/body movement from
+        # the source sequence but expression driven ONLY by audio.
+        if not source_info["is_image_flag"] and len(source_info["x_s_info_lst"]) > 1:
+            exp_ref = source_info["x_s_info_lst"][0]["exp"].copy()
+            for info in source_info["x_s_info_lst"]:
+                info["exp"] = exp_ref
+
         self.source_info = source_info
 
         # Frame skip: produce fewer frames through the pipeline (default: keep all)
