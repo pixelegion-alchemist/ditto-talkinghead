@@ -1,3 +1,4 @@
+import copy
 import os
 import threading
 import queue
@@ -557,6 +558,10 @@ class StreamSDK:
                     x_d_info_list = self.audio2motion.cvt_fmt(valid_res_kp_seq)
 
                     for _skip_i, x_d_info in enumerate(x_d_info_list):
+                        # VAD: during idle, use neutral expression (zero lip delta)
+                        if self._vad_alpha < 1.0 and self.motion_stitch.d0 is not None:
+                            x_d_info = copy.deepcopy(self.motion_stitch.d0)
+
                         # Skip frames at source — reduces ALL downstream stages
                         # frame_skip_n=2: keep every other frame (~12.5fps from 25fps)
                         if hasattr(self, "frame_skip_n") and self.frame_skip_n > 1:
