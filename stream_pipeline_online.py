@@ -66,7 +66,7 @@ class StreamSDK:
 
         self.wav2feat = Wav2Feat(**wav2feat_cfg)
 
-        self._vad_alpha = 1.0  # 1.0 = full expression, 0.0 = suppress lips
+        self._idle_mode = False  # True = replace audio output with d0 (no lip movement)
 
     def _merge_kwargs(self, default_kwargs, run_kwargs):
         for k, v in default_kwargs.items():
@@ -115,13 +115,14 @@ class StreamSDK:
         elif name != self._active_seq:
             self._pending_seq = name
 
-    def set_vad_alpha(self, alpha: float):
-        """Set VAD suppression alpha (thread-safe).
-
-        alpha=1.0: full audio-driven expression (speaking)
-        alpha=0.0: suppress lip movement entirely (idle/silence)
-        """
-        self._vad_alpha = float(alpha)
+    def set_idle(self, idle: bool):
+        """Toggle idle mode. When idle, audio2motion output is replaced
+        with d0 (neutral reference) → zero additive delta → no lip movement.
+        Body animation from source plates continues."""
+        was_idle = self._idle_mode
+        self._idle_mode = bool(idle)
+        if was_idle != self._idle_mode:
+            print(f"[StreamSDK] idle_mode={'ON' if self._idle_mode else 'OFF'}", flush=True)
 
     def setup(self, source_path, output_path, **kwargs):
 
@@ -255,7 +256,7 @@ class StreamSDK:
         if not source_info["is_image_flag"] and len(source_info["x_s_info_lst"]) > 1:
             exp_ref = source_info["x_s_info_lst"][0]["exp"].copy()
             for info in source_info["x_s_info_lst"]:
-                info["exp"] = exp_ref
+                info["exp"] = exp_ref.copy()  # independent copy per frame
 
         self.source_info = source_info
 
@@ -363,11 +364,6 @@ class StreamSDK:
         except Exception as e:
             traceback.print_exc()
             info = {}
-        # Inject dynamic VAD suppression
-        alpha = self._vad_alpha
-        if alpha < 1.0:
-            info = dict(info)  # copy so we don't mutate stored ctrl_info
-            info["vad_alpha"] = alpha
         return info
 
     def writer_worker(self):
@@ -558,8 +554,8 @@ class StreamSDK:
                     x_d_info_list = self.audio2motion.cvt_fmt(valid_res_kp_seq)
 
                     for _skip_i, x_d_info in enumerate(x_d_info_list):
-                        # VAD: during idle, use neutral expression (zero lip delta)
-                        if self._vad_alpha < 1.0 and self.motion_stitch.d0 is not None:
+                        # Idle mode: replace audio output with d0 (zero delta → no lip movement)
+                        if self._idle_mode and self.motion_stitch.d0 is not None:
                             x_d_info = copy.deepcopy(self.motion_stitch.d0)
 
                         # Skip frames at source — reduces ALL downstream stages
