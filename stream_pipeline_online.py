@@ -465,7 +465,10 @@ class StreamSDK:
                 break
 
             frame_idx, x_d_info, ctrl_kwargs = item
-            x_s_info = self.source_info["x_s_info_lst"][frame_idx]
+            # Face geometry (kp, exp) from frame 0, pose from plate frame_idx
+            x_s_info_frame = self.source_info["x_s_info_lst"][frame_idx]
+            x_s_info_ref = self.source_info["x_s_info_lst"][0]
+            x_s_info = {**x_s_info_frame, "kp": x_s_info_ref["kp"], "exp": x_s_info_ref["exp"]}
             x_s, x_d = self.motion_stitch(x_s_info, x_d_info, **ctrl_kwargs)
             self.warp_f3d_queue.put([frame_idx, x_s, x_d])
 
