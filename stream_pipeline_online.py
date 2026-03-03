@@ -65,7 +65,6 @@ class StreamSDK:
 
         self.wav2feat = Wav2Feat(**wav2feat_cfg)
 
-        self._plate_ref = None  # Reference motion data (frame 0) for plate body deltas
 
     def _merge_kwargs(self, default_kwargs, run_kwargs):
         for k, v in default_kwargs.items():
@@ -241,11 +240,6 @@ class StreamSDK:
 
         self.source_info = source_info
 
-        # Store plate reference (frame 0 motion data) for body delta injection.
-        # In sequence mode, face generation uses image-mode (fixed frame 0) while
-        # plate body deltas are injected into audio2motion output for (pitch, yaw, roll, t).
-        if self._seq_ranges:
-            self._plate_ref = source_info["x_s_info_lst"][0]
 
         # Frame skip: produce fewer frames through the pipeline (default: keep all)
         # skip_n=2 -> 12.5fps, skip_n=3 -> ~8fps from 25fps source
@@ -575,11 +569,11 @@ class StreamSDK:
                             self._seq_output_idx[seq_name] += 1
 
                             # Inject plate body motion into audio output.
-                            # Face uses image-mode (fixed ref), body deltas add
-                            # head pose from plates: final = ref + (audio - d0) + plate_delta
+                            # Audio2motion owns: exp (lips), pitch, yaw, roll (head rotation)
+                            # Plates own: t (placement), scale (face size)
                             plate_info = self.source_info["x_s_info_lst"][frame_idx]
-                            for _k in ("pitch", "yaw", "roll", "t"):
-                                x_d_info[_k] = x_d_info[_k] + (plate_info[_k] - self._plate_ref[_k])
+                            for _k in ("t", "scale"):
+                                x_d_info[_k] = plate_info[_k]
                         else:
                             # Single source mode (image or video file)
                             frame_idx = _mirror_index(gen_frame_idx, self.source_info_frames)
