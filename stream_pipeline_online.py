@@ -545,10 +545,10 @@ class StreamSDK:
                             start, count = self._seq_ranges[seq_name]
                             seq_idx = self._seq_output_idx[seq_name]
 
-                            # Switch at loop boundary (mirror wraps to frame 0)
+                            # Switch at half-period boundary (both turnaround points
+                            # of the mirror cycle: frame 0 and frame N-1).
                             if self._pending_seq:
-                                period = count * 2 - 2  # mirror loop period
-                                if seq_idx > 0 and seq_idx % period == 0:
+                                if seq_idx > 0 and seq_idx % count == 0:
                                     self._active_seq = self._pending_seq
                                     self._pending_seq = None
                                     seq_name = self._active_seq
