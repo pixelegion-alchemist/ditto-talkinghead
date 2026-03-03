@@ -443,7 +443,7 @@ class StreamSDK:
                 self.decode_f3d_queue.put(None)
                 break
             frame_idx, x_s, x_d = item
-            f_s = self._f_s_gpu_lst[frame_idx]
+            f_s = self._f_s_gpu_lst[0]
             f_3d = self.warp_f3d(f_s, x_s, x_d, keep_on_gpu=True)
             self.decode_f3d_queue.put([frame_idx, f_3d])
 
