@@ -1,4 +1,3 @@
-import copy
 import os
 import threading
 import queue
@@ -66,7 +65,7 @@ class StreamSDK:
 
         self.wav2feat = Wav2Feat(**wav2feat_cfg)
 
-        self._idle_mode = False  # True = replace audio output with d0 (no lip movement)
+        self._plate_ref = None  # Reference motion data (frame 0) for plate body deltas
 
     def _merge_kwargs(self, default_kwargs, run_kwargs):
         for k, v in default_kwargs.items():
@@ -114,15 +113,6 @@ class StreamSDK:
             self._seq_output_idx[name] = 0
         elif name != self._active_seq:
             self._pending_seq = name
-
-    def set_idle(self, idle: bool):
-        """Toggle idle mode. When idle, audio2motion output is replaced
-        with d0 (neutral reference) → zero additive delta → no lip movement.
-        Body animation from source plates continues."""
-        was_idle = self._idle_mode
-        self._idle_mode = bool(idle)
-        if was_idle != self._idle_mode:
-            print(f"[StreamSDK] idle_mode={'ON' if self._idle_mode else 'OFF'}", flush=True)
 
     def setup(self, source_path, output_path, **kwargs):
 
@@ -249,16 +239,13 @@ class StreamSDK:
         if len(source_info["x_s_info_lst"]) > 1 and self.smo_k_s > 1:
             source_info["x_s_info_lst"] = smooth_x_s_info_lst(source_info["x_s_info_lst"], smo_k=self.smo_k_s)
 
-        # Freeze facial expression to frame 0 across all source frames.
-        # Source video frames have natural expression variation (mouth micro-movements)
-        # that cycles through as phantom lip sync.  We want head/body movement from
-        # the source sequence but expression driven ONLY by audio.
-        if not source_info["is_image_flag"] and len(source_info["x_s_info_lst"]) > 1:
-            exp_ref = source_info["x_s_info_lst"][0]["exp"].copy()
-            for info in source_info["x_s_info_lst"]:
-                info["exp"] = exp_ref.copy()  # independent copy per frame
-
         self.source_info = source_info
+
+        # Store plate reference (frame 0 motion data) for body delta injection.
+        # In sequence mode, face generation uses image-mode (fixed frame 0) while
+        # plate body deltas are injected into audio2motion output for (pitch, yaw, roll, t).
+        if self._seq_ranges:
+            self._plate_ref = source_info["x_s_info_lst"][0]
 
         # Frame skip: produce fewer frames through the pipeline (default: keep all)
         # skip_n=2 -> 12.5fps, skip_n=3 -> ~8fps from 25fps source
@@ -292,7 +279,10 @@ class StreamSDK:
         )
 
         # ======== Setup Motion Stitch ========
-        is_image_flag = source_info["is_image_flag"]
+        # Sequence mode uses image-mode for face generation (fixed reference face,
+        # all expression from audio). Plate body motion is injected into x_d_info
+        # in _audio2motion_worker, not via video-path puppetry.
+        is_image_flag = True if self._seq_ranges else source_info["is_image_flag"]
         x_s_info = source_info['x_s_info_lst'][0]
         self.motion_stitch.setup(
             N_d=self.N_d,
@@ -459,7 +449,9 @@ class StreamSDK:
                 self.decode_f3d_queue.put(None)
                 break
             frame_idx, x_s, x_d = item
-            f_s = self._f_s_gpu_lst[frame_idx]
+            # Sequence mode: fixed face appearance (frame 0), frame_idx is for body only
+            face_idx = 0 if self._seq_ranges else frame_idx
+            f_s = self._f_s_gpu_lst[face_idx]
             f_3d = self.warp_f3d(f_s, x_s, x_d, keep_on_gpu=True)
             self.decode_f3d_queue.put([frame_idx, f_3d])
 
@@ -481,7 +473,9 @@ class StreamSDK:
                 break
 
             frame_idx, x_d_info, ctrl_kwargs = item
-            x_s_info = self.source_info["x_s_info_lst"][frame_idx]
+            # Sequence mode: fixed face reference (image mode), frame_idx is for body only
+            face_idx = 0 if self._seq_ranges else frame_idx
+            x_s_info = self.source_info["x_s_info_lst"][face_idx]
             x_s, x_d = self.motion_stitch(x_s_info, x_d_info, **ctrl_kwargs)
             self.warp_f3d_queue.put([frame_idx, x_s, x_d])
 
@@ -554,10 +548,6 @@ class StreamSDK:
                     x_d_info_list = self.audio2motion.cvt_fmt(valid_res_kp_seq)
 
                     for _skip_i, x_d_info in enumerate(x_d_info_list):
-                        # Idle mode: replace audio output with d0 (zero delta → no lip movement)
-                        if self._idle_mode and self.motion_stitch.d0 is not None:
-                            x_d_info = copy.deepcopy(self.motion_stitch.d0)
-
                         # Skip frames at source — reduces ALL downstream stages
                         # frame_skip_n=2: keep every other frame (~12.5fps from 25fps)
                         if hasattr(self, "frame_skip_n") and self.frame_skip_n > 1:
@@ -583,6 +573,13 @@ class StreamSDK:
 
                             frame_idx = start + _mirror_index(seq_idx, count)
                             self._seq_output_idx[seq_name] += 1
+
+                            # Inject plate body motion into audio output.
+                            # Face uses image-mode (fixed ref), body deltas add
+                            # head pose from plates: final = ref + (audio - d0) + plate_delta
+                            plate_info = self.source_info["x_s_info_lst"][frame_idx]
+                            for _k in ("pitch", "yaw", "roll", "t"):
+                                x_d_info[_k] = x_d_info[_k] + (plate_info[_k] - self._plate_ref[_k])
                         else:
                             # Single source mode (image or video file)
                             frame_idx = _mirror_index(gen_frame_idx, self.source_info_frames)
