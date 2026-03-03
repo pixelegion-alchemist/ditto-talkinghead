@@ -65,6 +65,8 @@ class StreamSDK:
 
         self.wav2feat = Wav2Feat(**wav2feat_cfg)
 
+        self._vad_alpha = 1.0  # 1.0 = full expression, 0.0 = suppress lips
+
     def _merge_kwargs(self, default_kwargs, run_kwargs):
         for k, v in default_kwargs.items():
             if k not in run_kwargs:
@@ -111,6 +113,14 @@ class StreamSDK:
             self._seq_output_idx[name] = 0
         elif name != self._active_seq:
             self._pending_seq = name
+
+    def set_vad_alpha(self, alpha: float):
+        """Set VAD suppression alpha (thread-safe).
+
+        alpha=1.0: full audio-driven expression (speaking)
+        alpha=0.0: suppress lip movement entirely (idle/silence)
+        """
+        self._vad_alpha = float(alpha)
 
     def setup(self, source_path, output_path, **kwargs):
 
@@ -344,14 +354,20 @@ class StreamSDK:
     def _get_ctrl_info(self, fid):
         try:
             if isinstance(self.ctrl_info, dict):
-                return self.ctrl_info.get(fid, {})
+                info = self.ctrl_info.get(fid, {})
             elif isinstance(self.ctrl_info, list):
-                return self.ctrl_info[fid]
+                info = self.ctrl_info[fid]
             else:
-                return {}
+                info = {}
         except Exception as e:
             traceback.print_exc()
-            return {}
+            info = {}
+        # Inject dynamic VAD suppression
+        alpha = self._vad_alpha
+        if alpha < 1.0:
+            info = dict(info)  # copy so we don't mutate stored ctrl_info
+            info["vad_alpha"] = alpha
+        return info
 
     def writer_worker(self):
         try:
