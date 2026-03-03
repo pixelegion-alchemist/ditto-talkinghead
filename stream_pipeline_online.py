@@ -443,9 +443,7 @@ class StreamSDK:
                 self.decode_f3d_queue.put(None)
                 break
             frame_idx, x_s, x_d = item
-            # Sequence mode: fixed face appearance (frame 0), frame_idx is for body only
-            face_idx = 0 if self._seq_ranges else frame_idx
-            f_s = self._f_s_gpu_lst[face_idx]
+            f_s = self._f_s_gpu_lst[frame_idx]
             f_3d = self.warp_f3d(f_s, x_s, x_d, keep_on_gpu=True)
             self.decode_f3d_queue.put([frame_idx, f_3d])
 
@@ -467,9 +465,7 @@ class StreamSDK:
                 break
 
             frame_idx, x_d_info, ctrl_kwargs = item
-            # Sequence mode: fixed face reference (image mode), frame_idx is for body only
-            face_idx = 0 if self._seq_ranges else frame_idx
-            x_s_info = self.source_info["x_s_info_lst"][face_idx]
+            x_s_info = self.source_info["x_s_info_lst"][frame_idx]
             x_s, x_d = self.motion_stitch(x_s_info, x_d_info, **ctrl_kwargs)
             self.warp_f3d_queue.put([frame_idx, x_s, x_d])
 
